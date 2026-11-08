@@ -6,18 +6,21 @@ import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from agent import run_agent
+
 load_dotenv()
 
+# Mỗi nguồn nhớ tên model riêng
 PROVIDERS = {
-    "LM Studio (local)": {
-        "base_url": "http://localhost:1234/v1",
-        "api_key": "lm-studio",
-        "model": "qwen/qwen3-4b-2507",  # đổi đúng tên model bạn đã load
-    },
     "Gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
         "api_key": os.getenv("GEMINI_API_KEY", ""),
         "model": "gemini-3.1-flash-lite",
+    },
+    "LM Studio (local)": {
+        "base_url": "http://localhost:1234/v1",
+        "api_key": "lm-studio",
+        "model": "qwen/qwen3-4b-2507",
     },
 }
 
@@ -37,6 +40,16 @@ def save_history(history):
     )
 
 
+def show_events(events):
+    """Hiển thị các lần AI đã gọi tool."""
+    for e in events:
+        with st.expander(f"🔧 Đã gọi tool: {e['tool']}"):
+            st.write("**Tham số:**")
+            st.json(e["args"])
+            st.write("**Kết quả:**")
+            st.code(e["result"])
+
+
 st.set_page_config(page_title="AI cá nhân", page_icon="🤖")
 st.title("🤖 AI cá nhân")
 
@@ -45,7 +58,9 @@ with st.sidebar:
     st.header("Cài đặt")
     provider_name = st.selectbox("Nguồn model", list(PROVIDERS.keys()))
     cfg = PROVIDERS[provider_name]
-    model = st.text_input("Tên model", value=cfg["model"])
+    # key theo nguồn để đổi nguồn thì tên model tự đổi theo
+    model = st.text_input("Tên model", value=cfg["model"], key=f"model_{provider_name}")
+    st.caption("AI có thể đọc/ghi file trong thư mục `workspace/`.")
     if st.button("🗑️ Xóa lịch sử chat"):
         st.session_state.history = []
         save_history([])
@@ -57,6 +72,8 @@ if "history" not in st.session_state:
 
 profile = PROFILE_FILE.read_text(encoding="utf-8") if PROFILE_FILE.exists() else ""
 system_prompt = f"""Bạn là trợ lý cá nhân của tôi. Trả lời bằng tiếng Việt, ngắn gọn, dễ hiểu.
+Bạn có các tool để xem, đọc và ghi file trong thư mục workspace. Chỉ dùng tool khi thật sự cần.
+Trước khi ghi đè một file đã có, hãy đọc nó trước. Sau khi dùng tool, báo lại ngắn gọn bạn đã làm gì.
 Thông tin về tôi:
 {profile}"""
 
@@ -73,22 +90,18 @@ if prompt := st.chat_input("Nhắn gì đó cho AI..."):
 
     client = OpenAI(base_url=cfg["base_url"], api_key=cfg["api_key"])
 
-    def stream_answer():
-        try:
-            stream = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "system", "content": system_prompt}]
-                + st.session_state.history[-30:],
-                stream=True,
-            )
-            for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
-        except Exception as e:
-            yield f"⚠️ Lỗi: {e}\n\nKiểm tra: server LM Studio đã bật chưa? API key và tên model đúng chưa?"
-
     with st.chat_message("assistant"):
-        answer = st.write_stream(stream_answer())
+        try:
+            with st.spinner("AI đang suy nghĩ..."):
+                answer, events = run_agent(
+                    client, model, system_prompt, st.session_state.history[-30:]
+                )
+            show_events(events)
+            st.markdown(answer)
+        except Exception as e:
+            answer = f"⚠️ Lỗi: {e}"
+            st.markdown(answer)
 
+    # Chỉ lưu lời nói của bạn và câu trả lời cuối vào lịch sử
     st.session_state.history.append({"role": "assistant", "content": answer})
     save_history(st.session_state.history)
